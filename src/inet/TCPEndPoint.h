@@ -561,36 +561,20 @@ private:
     uint32_t mConnectTimeoutMsecs;                      // This is the timeout to wait for a Connect call to succeed or
                                                         // return an error; zero means use system defaults.
 
-#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
-    uint32_t mUserTimeoutMillis;                        // The configured TCP user timeout value in milliseconds.
-                                                        // If 0, assume not set.
-#if INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
-    bool mIsTCPSendIdle;                                // Indicates whether the send channel of the TCPEndPoint is Idle.
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
+    bool mTCPPollTimerRunning;                      // Indicates whether the TCP UserTimeout timer has been started.
 
-    uint16_t mTCPSendQueueRemainingPollCount;           // The current remaining number of TCP SendQueue polls before
-                                                        // the TCP User timeout period is reached.
+    void InitTCPSendQueuePollConfigs(void);
 
-    uint32_t mTCPSendQueuePollPeriodMillis;             // The configured period of active polling of the TCP
-                                                        // SendQueue. If 0, assume not set.
-    void SetTCPSendIdleAndNotifyChange(bool aIsSendIdle);
+    static void TCPPollTimeoutHandler(Weave::System::Layer* aSystemLayer, void* aAppState, Weave::System::Error aError);
 
-#endif // INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
+    void StartTCPPollTimer(void);
 
-    bool mUserTimeoutTimerRunning;                      // Indicates whether the TCP UserTimeout timer has been started.
+    void StopTCPPollTimer(void);
 
-    static void TCPUserTimeoutHandler(Weave::System::Layer* aSystemLayer, void* aAppState, Weave::System::Error aError);
+    void RestartTCPPollTimer(void);
 
-    void StartTCPUserTimeoutTimer(void);
-
-    void StopTCPUserTimeoutTimer(void);
-
-    void RestartTCPUserTimeoutTimer(void);
-
-    void ScheduleNextTCPUserTimeoutPoll(uint32_t aTimeOut);
-
-#if INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
-    uint16_t MaxTCPSendQueuePolls(void);
-#endif // INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
+    void ScheduleNextTCPPoll(uint32_t aTimeOut);
 
 #if WEAVE_SYSTEM_CONFIG_USE_SOCKETS
     uint32_t mBytesWrittenSinceLastProbe;               // This counts the number of bytes written on the TCP socket since the
@@ -601,7 +585,28 @@ private:
     INET_ERROR CheckConnectionProgress(bool &IsProgressing);
 #endif // WEAVE_SYSTEM_CONFIG_USE_SOCKETS
 
+#if INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
+    bool mIsTCPSendIdle;                                // Indicates whether the send channel of the TCPEndPoint is Idle.
+
+    uint32_t mTCPSendQueuePollPeriodMillis;             // The configured period of active polling of the TCP
+                                                        // SendQueue. If 0, assume not set.
+    void SetTCPSendIdleAndNotifyChange(bool aIsSendIdle);
+
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+    uint16_t mTCPSendQueueRemainingPollCount;           // The current remaining number of TCP SendQueue polls before
+                                                        // the TCP User timeout period is reached.
+
+    uint16_t MaxTCPSendQueuePolls(void);
 #endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+
+#endif // INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
+
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+    uint32_t mUserTimeoutMillis;                        // The configured TCP user timeout value in milliseconds.
+                                                        // If 0, assume not set.
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 
     TCPEndPoint(void);                                  // not defined
     TCPEndPoint(const TCPEndPoint&);                    // not defined

@@ -723,15 +723,15 @@ INET_ERROR TCPEndPoint::Send(PacketBuffer *data, bool push)
         mUnsentOffset = 0;
     }
 
-#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
-    if (!mUserTimeoutTimerRunning)
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
+    if (!mTCPPollTimerRunning)
     {
         // Timer was not running before this send. So, start
         // the timer.
 
-        StartTCPUserTimeoutTimer();
+        StartTCPPollTimer();
     }
-#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 
 #endif // WEAVE_SYSTEM_CONFIG_USE_LWIP
 
@@ -1185,30 +1185,43 @@ void TCPEndPoint::Init(InetLayer *inetLayer)
     // Initialize to zero for using system defaults.
     mConnectTimeoutMsecs = 0;
 
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
+    InitTCPSendQueuePollConfigs();
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
+}
+
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
+void TCPEndPoint::InitTCPSendQueuePollConfigs(void)
+{
+    mTCPPollTimerRunning = false;
+
+#if WEAVE_SYSTEM_CONFIG_USE_SOCKETS
+    mBytesWrittenSinceLastProbe = 0;
+
+    mLastTCPKernelSendQueueLen = 0;
+#endif // WEAVE_SYSTEM_CONFIG_USE_SOCKETS
+
 #if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
     mUserTimeoutMillis = INET_CONFIG_DEFAULT_TCP_USER_TIMEOUT_MSEC;
-
-    mUserTimeoutTimerRunning = false;
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
 
 #if INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
     mIsTCPSendIdle = true;
 
     mTCPSendQueuePollPeriodMillis = INET_CONFIG_TCP_SEND_QUEUE_POLL_INTERVAL_MSEC;
 
-    mTCPSendQueueRemainingPollCount = MaxTCPSendQueuePolls();
-
     OnTCPSendIdleChanged = NULL;
-#endif // INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 
-#if WEAVE_SYSTEM_CONFIG_USE_SOCKETS
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+    // The polling has a max upper bound only when the
+    // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT is enabled.
 
-    mBytesWrittenSinceLastProbe = 0;
-
-    mLastTCPKernelSendQueueLen = 0;
-#endif // WEAVE_SYSTEM_CONFIG_USE_SOCKETS
-
+    mTCPSendQueueRemainingPollCount = MaxTCPSendQueuePolls();
 #endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+
+#endif // INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 }
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 
 INET_ERROR TCPEndPoint::DriveSending()
 {
@@ -1346,7 +1359,7 @@ INET_ERROR TCPEndPoint::DriveSending()
         SetTCPSendIdleAndNotifyChange(false);
 #endif // INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 
-#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
         mBytesWrittenSinceLastProbe += lenSent;
 
         bool isProgressing = false;
@@ -1357,21 +1370,21 @@ INET_ERROR TCPEndPoint::DriveSending()
             break;
         }
 
-        if (!mUserTimeoutTimerRunning)
+        if (!mTCPPollTimerRunning)
         {
             // Timer was not running before this write. So, start
             // the timer.
 
-            StartTCPUserTimeoutTimer();
+            StartTCPPollTimer();
         }
         else if (isProgressing)
         {
             // Progress is being made. So, shift the timer
             // forward if it was started.
 
-            RestartTCPUserTimeoutTimer();
+            RestartTCPPollTimer();
         }
-#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 
         if (lenSent < bufLen)
             break;
@@ -1565,10 +1578,10 @@ INET_ERROR TCPEndPoint::DoClose(INET_ERROR err, bool suppressCallback)
 
 #endif // WEAVE_SYSTEM_CONFIG_USE_SOCKETS
 
-#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
-    // Stop the TCP UserTimeout timer if it is running.
-    StopTCPUserTimeoutTimer();
-#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
+    // Stop the TCP Poll timer if it is running.
+    StopTCPPollTimer();
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 
     // If entering the Closed state...
     if (State == kState_Closed)
@@ -1614,15 +1627,15 @@ INET_ERROR TCPEndPoint::DoClose(INET_ERROR err, bool suppressCallback)
     return err;
 }
 
-#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
-void TCPEndPoint::TCPUserTimeoutHandler(Weave::System::Layer* aSystemLayer, void* aAppState, Weave::System::Error aError)
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
+void TCPEndPoint::TCPPollTimeoutHandler(Weave::System::Layer* aSystemLayer, void* aAppState, Weave::System::Error aError)
 {
     TCPEndPoint * tcpEndPoint = reinterpret_cast<TCPEndPoint *>(aAppState);
 
     VerifyOrDie((aSystemLayer != NULL) && (tcpEndPoint != NULL));
 
     // Set the timer running flag to false
-    tcpEndPoint->mUserTimeoutTimerRunning = false;
+    tcpEndPoint->mTCPPollTimerRunning = false;
 
 #if WEAVE_SYSTEM_CONFIG_USE_SOCKETS
     INET_ERROR err = INET_NO_ERROR;
@@ -1630,57 +1643,74 @@ void TCPEndPoint::TCPUserTimeoutHandler(Weave::System::Layer* aSystemLayer, void
     err = tcpEndPoint->CheckConnectionProgress(isProgressing);
     SuccessOrExit(err);
 
-    if (tcpEndPoint->mLastTCPKernelSendQueueLen == 0)
+    if (tcpEndPoint->mLastTCPKernelSendQueueLen == 0 && tcpEndPoint->mSendQueue == NULL)
     {
 #if INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
         // If the kernel TCP send queue as well as the TCPEndPoint
         // send queue have been flushed then notify application
         // that all data has been acknowledged.
+        // No need to re-arm timer.
 
-        if (tcpEndPoint->mSendQueue == NULL)
-        {
-            tcpEndPoint->SetTCPSendIdleAndNotifyChange(true);
-        }
+        tcpEndPoint->SetTCPSendIdleAndNotifyChange(true);
 #endif // INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
     }
     else
     // There is data in the TCP Send Queue
     {
+#if !INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+        // Restart timer to poll again if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+        // is NOT enabled until all data is acknowledged at which point an
+        // application notification can be sent up.
+
+        tcpEndPoint->ScheduleNextTCPPoll(tcpEndPoint->mTCPSendQueuePollPeriodMillis);
+#else
+        // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT is enabled.
+        // So, check progress and appropriately adjust remaining
+        // poll count.
         if (isProgressing)
         {
-            // Data is flowing, so restart the UserTimeout timer
+            // Data is flowing, so restart the poll timeout timer
             // to shift it forward while also resetting the max
             // poll count.
 
-            tcpEndPoint->StartTCPUserTimeoutTimer();
+            tcpEndPoint->StartTCPPollTimer();
         }
         else
+        // Data flow is not progressing.
         {
 #if INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
-            // Data flow is not progressing.
             // Decrement the remaining max TCP send queue polls.
 
             tcpEndPoint->mTCPSendQueueRemainingPollCount--;
 
+            // If all remaining polls have been exhausted, the TCP
+            // connection has effectively experienced a UserTimeout.
+            // The connection needs to be closed.
             VerifyOrExit(tcpEndPoint->mTCPSendQueueRemainingPollCount != 0,
                          err = INET_ERROR_TCP_USER_TIMEOUT);
 
             // Restart timer to poll again
 
-            tcpEndPoint->ScheduleNextTCPUserTimeoutPoll(tcpEndPoint->mTCPSendQueuePollPeriodMillis);
+            tcpEndPoint->ScheduleNextTCPPoll(tcpEndPoint->mTCPSendQueuePollPeriodMillis);
 #else
-            // Close the connection as the TCP UserTimeout has expired
+            // Only INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT is enabled
+            // and so we have timed out at the end of the UserTimeout.
+            // Effectively, the TCP connection has experieced a UserTimeout
+            // and connection needs to be closed.
+
+            // Close the connection as the TCP poll timeout has expired
 
             ExitNow(err = INET_ERROR_TCP_USER_TIMEOUT);
 #endif // !INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
         }
+#endif // !INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
     }
 
 exit:
 
     if (err != INET_NO_ERROR)
     {
-        // Close the connection as the TCP UserTimeout has expired
+        // Close the connection as the TCP poll timeout has expired
 
         tcpEndPoint->DoClose(err, false);
     }
@@ -1695,11 +1725,11 @@ exit:
 
 }
 
-void TCPEndPoint::ScheduleNextTCPUserTimeoutPoll(uint32_t aTimeOut)
+void TCPEndPoint::ScheduleNextTCPPoll(uint32_t aTimeOut)
 {
     Weave::System::Layer& lSystemLayer = SystemLayer();
 
-    lSystemLayer.StartTimer(aTimeOut, TCPUserTimeoutHandler, this);
+    lSystemLayer.StartTimer(aTimeOut, TCPPollTimeoutHandler, this);
 }
 
 #if INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
@@ -1720,42 +1750,52 @@ void TCPEndPoint::SetTCPSendIdleAndNotifyChange(bool aIsTCPSendIdle)
 }
 #endif // INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 
-void TCPEndPoint::StartTCPUserTimeoutTimer()
+void TCPEndPoint::StartTCPPollTimer()
 {
-    uint32_t timeOut = mUserTimeoutMillis;
+    uint32_t timeOut;
+
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+    timeOut = mUserTimeoutMillis;
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
 
 #if INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
     //Set timeout to the poll interval
 
     timeOut = mTCPSendQueuePollPeriodMillis;
 
-    // Reset the poll count
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+
+    // Reset the poll count. This feature is only relevant
+    // when the INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+    // is also enabled.
 
     mTCPSendQueueRemainingPollCount = MaxTCPSendQueuePolls();
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+
 #endif // INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 
-    ScheduleNextTCPUserTimeoutPoll(timeOut);
+    ScheduleNextTCPPoll(timeOut);
 
-    mUserTimeoutTimerRunning = true;
+    mTCPPollTimerRunning = true;
 }
 
-void TCPEndPoint::StopTCPUserTimeoutTimer()
+void TCPEndPoint::StopTCPPollTimer()
 {
     Weave::System::Layer& lSystemLayer = SystemLayer();
 
-    lSystemLayer.CancelTimer(TCPUserTimeoutHandler, this);
+    lSystemLayer.CancelTimer(TCPPollTimeoutHandler, this);
 
-    mUserTimeoutTimerRunning = false;
+    mTCPPollTimerRunning = false;
 }
 
-void TCPEndPoint::RestartTCPUserTimeoutTimer()
+void TCPEndPoint::RestartTCPPollTimer()
 {
-    StopTCPUserTimeoutTimer();
+    StopTCPPollTimer();
 
-    StartTCPUserTimeoutTimer();
+    StartTCPPollTimer();
 }
 
-#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 
 #if WEAVE_SYSTEM_CONFIG_USE_LWIP
 
@@ -1841,8 +1881,8 @@ void TCPEndPoint::HandleDataSent(uint16_t lenSent)
         // Consume data off the head of the send queue equal to the amount of data being acknowledged.
         mSendQueue = mSendQueue->Consume(lenSent);
 
-#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
-        // Only change the UserTimeout timer if lenSent > 0,
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
+        // Only change the TCP poll timer if lenSent > 0,
         // indicating progress being made in sending data
         // across.
         if (lenSent > 0)
@@ -1851,7 +1891,7 @@ void TCPEndPoint::HandleDataSent(uint16_t lenSent)
             {
                 // If the output queue has been flushed then stop the timer.
 
-                StopTCPUserTimeoutTimer();
+                StopTCPPollTimer();
 
 #if INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
                 // Notify up if all outstanding data has been acknowledged
@@ -1863,10 +1903,10 @@ void TCPEndPoint::HandleDataSent(uint16_t lenSent)
             {
                 // Progress is being made. So, shift the timer
                 // forward if it was started.
-                RestartTCPUserTimeoutTimer();
+                RestartTCPPollTimer();
             }
         }
-#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 
         // Mark the connection as being active.
         MarkActive();
@@ -2294,7 +2334,7 @@ void TCPEndPoint::ReceiveData()
     // Attempt to receive data from the socket.
     ssize_t rcvLen = recv(mSocket, rcvBuf->Start() + rcvBuf->DataLength(), rcvBuf->AvailableDataLength(), 0);
 
-#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
     INET_ERROR err;
     bool isProgressing = false;
 
@@ -2306,26 +2346,23 @@ void TCPEndPoint::ReceiveData()
         return;
     }
 
-    if (mLastTCPKernelSendQueueLen == 0)
+    if (mLastTCPKernelSendQueueLen == 0 && mSendQueue == NULL)
     {
         // If the output queue has been flushed then stop the timer.
 
-        StopTCPUserTimeoutTimer();
+        StopTCPPollTimer();
 
 #if INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
         // Notify up if all outstanding data has been acknowledged
 
-        if (mSendQueue == NULL)
-        {
-            SetTCPSendIdleAndNotifyChange(true);
-        }
+        SetTCPSendIdleAndNotifyChange(true);
 #endif // INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
     }
-    else if (isProgressing && mUserTimeoutTimerRunning)
+    else if (isProgressing && mTCPPollTimerRunning)
     {
         // Progress is being made. So, shift the timer
         // forward if it was started.
-        RestartTCPUserTimeoutTimer();
+        RestartTCPPollTimer();
     }
 #endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
     // If an error occurred, abort the connection.
@@ -2481,7 +2518,7 @@ void TCPEndPoint::HandleIncomingConnection()
     }
 }
 
-#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+#if INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 /**
  *  This function probes the TCP output queue and checks if data is successfully
  *  being transferred to the other end.
@@ -2522,7 +2559,7 @@ INET_ERROR TCPEndPoint::CheckConnectionProgress(bool &isProgressing)
 exit:
    return err;
 }
-#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT
+#endif // INET_CONFIG_OVERRIDE_SYSTEM_TCP_USER_TIMEOUT || INET_CONFIG_ENABLE_TCP_SEND_IDLE_CALLBACKS
 
 #endif // WEAVE_SYSTEM_CONFIG_USE_SOCKETS
 
